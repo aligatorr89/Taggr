@@ -41,10 +41,7 @@ fi
 MINTER_ACCOUNT=$(dfx ledger account-id --identity minter)
 LOCAL_MINTER_ACCOUNT=$(dfx ledger account-id --identity local-minter)
 
-# --mode reinstall so re-running this script (e.g. between e2e iterations)
-# wipes ledger state and re-applies the Init args instead of attempting an
-# upgrade with an Init-shaped payload.
-dfx deploy icp_ledger --mode reinstall -y --argument "(variant { Init = record {
+ARGUMENT="(variant { Init = record {
   minting_account = \"${MINTER_ACCOUNT}\";
   initial_values = vec {
     record { \"${LOCAL_MINTER_ACCOUNT}\"; record { e8s = 100_000_000_000_000 : nat64 } };
@@ -54,3 +51,25 @@ dfx deploy icp_ledger --mode reinstall -y --argument "(variant { Init = record {
   token_symbol = opt \"ICP\";
   token_name = opt \"Internet Computer\";
 } })"
+
+# Wait for the HTTP gateway to be healthy. Right after `dfx canister create` the
+# gateway can briefly 503 with "upstream_error" on the next install_code — most
+# visible on macOS Docker Desktop. A few `dfx ping` cycles let it settle.
+for _ in $(seq 1 30); do
+  dfx ping >/dev/null 2>&1 && break
+  sleep 1
+done
+
+# --mode reinstall so re-running this script (e.g. between e2e iterations)
+# wipes ledger state and re-applies the Init args instead of attempting an
+# upgrade with an Init-shaped payload.
+# Retry the deploy: even after the warmup, the gateway can flake once on the
+# install_code call. Three attempts with backoff covers the observed window.
+for attempt in 1 2 3; do
+  if dfx deploy icp_ledger --mode reinstall -y --argument "${ARGUMENT}"; then
+    exit 0
+  fi
+  echo "icp_ledger deploy attempt ${attempt} failed; retrying in $((attempt * 5))s..." >&2
+  sleep $((attempt * 5))
+done
+exit 1
